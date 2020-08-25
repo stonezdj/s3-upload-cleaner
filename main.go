@@ -19,17 +19,17 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3"
 )
 
-const cleanupHours = 2
 const startedadDateFormat = "2006-01-02T15:04:05Z"
 
 var opts struct {
-	Endpoint      string `short:"e" long:"endpoint" description:"Endpoint" required:"true"`
-	Region        string `short:"r" long:"region" description:"Region" required:"true"`
-	Bucket        string `short:"b" long:"bucket" description:"Bucket" required:"true"`
+	Endpoint      string `short:"e" long:"endpoint" description:"The endpoint, for example: https://s3.us-west-1.amazonaws.com" required:"true"`
+	Region        string `short:"r" long:"region" description:"Region of the bucket, for example: us-west-1" required:"true"`
+	Bucket        string `short:"b" long:"bucket" description:"The bucket name" required:"true"`
 	AccessKey     string `short:"a" long:"accesskey" description:"Access Key" required:"true"`
 	SecretKey     string `short:"s" long:"secretkey" description:"Secret Key" required:"true"`
-	RootDirectory string `short:"d" long:"rootdir" description:"Root Directory" required:"true"`
-	DryRun        bool   `short:"y" long:"dryrun" description:"Dry Run" required:"false"`
+	RootDirectory string `short:"d" long:"rootdir" description:"The root directory of the docker registry" required:"true"`
+	CleanupHours  int    `short:"c" long:"cleanup" description:"Cleanup Hours, it will cleanup multipart created before this hours ." default:"3" required:"false"`
+	DryRun        bool   `short:"y" long:"dryrun" description:"Dry run" required:"false"`
 }
 
 const MaxResultCount = 1000
@@ -47,6 +47,7 @@ func main() {
 	totalRemoved := 0
 	s := getS3Client(opts.Endpoint, opts.Region, opts.AccessKey, opts.SecretKey)
 
+	fmt.Printf("CleanupHours:%v\n", opts.CleanupHours)
 	fmt.Printf("Endpoint: %s\n", *s.Config.Endpoint)
 	fmt.Printf("Bucket: %s\n\n", opts.Bucket)
 
@@ -118,7 +119,7 @@ func cleanMPUs(s *s3.S3, bucket, prefix string) (totalRemoved int) {
 
 			fmt.Printf("  Started %d hours ago\n", hoursSince)
 
-			if hoursSince > cleanupHours {
+			if hoursSince >= opts.CleanupHours {
 				fmt.Printf("bucket %v, key: %+v, uploadID: %+v\n", bucket, *multi.Key, *multi.UploadId)
 				if !opts.DryRun {
 					_, err = s.AbortMultipartUpload(&s3.AbortMultipartUploadInput{
@@ -164,7 +165,7 @@ func cleanUploadFolders(s *s3.S3, bucket, prefix string) {
 					continue
 				}
 
-				if hoursSince > cleanupHours {
+				if hoursSince >= opts.CleanupHours {
 					fmt.Printf("  Removing folder %s (%d hours)\n", *o.Key, hoursSince)
 					if !opts.DryRun {
 						removeUploadFolder(s, bucket, *o.Key)
