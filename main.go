@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"fmt"
+	"github.com/jessevdk/go-flags"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -16,88 +19,124 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3"
 )
 
-const cleanupHours = 12
+const cleanupHours = 2
 const startedadDateFormat = "2006-01-02T15:04:05Z"
 
+var opts struct {
+	Endpoint      string `short:"e" long:"endpoint" description:"Endpoint" required:"true"`
+	Region        string `short:"r" long:"region" description:"Region" required:"true"`
+	Bucket        string `short:"b" long:"bucket" description:"Bucket" required:"true"`
+	AccessKey     string `short:"a" long:"accesskey" description:"Access Key" required:"true"`
+	SecretKey     string `short:"s" long:"secretkey" description:"Secret Key" required:"true"`
+	RootDirectory string `short:"d" long:"rootdir" description:"Root Directory" required:"true"`
+	DryRun        bool   `short:"y" long:"dryrun" description:"Dry Run" required:"false"`
+}
+
+const MaxResultCount = 1000
+
 func main() {
-
-	endPoint, bucket, accessKey, secretAccessKey := getCommandLineArgs()
-
+	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	_, err := flags.ParseArgs(&opts, os.Args)
+	if err != nil {
+		fmt.Printf("failed to parse command line parameters, error %v", err)
+		return
+	}
+	if opts.DryRun {
+		fmt.Println("run cleanup script in DryRun mode")
+	}
 	totalRemoved := 0
-	s := getS3Client(endPoint, accessKey, secretAccessKey)
+	s := getS3Client(opts.Endpoint, opts.Region, opts.AccessKey, opts.SecretKey)
 
 	fmt.Printf("Endpoint: %s\n", *s.Config.Endpoint)
-	fmt.Printf("Bucket: %s\n\n", bucket)
+	fmt.Printf("Bucket: %s\n\n", opts.Bucket)
 
-	objs, err := s.ListObjects(&s3.ListObjectsInput{
-		Bucket:    aws.String(bucket),
-		Prefix:    aws.String("docker/registry/v2/repositories/"),
-		Delimiter: aws.String("/"),
-	})
+	var isTruncated = true
+	var marker string
+	maxKey := int64(MaxResultCount)
+	for isTruncated {
+		objs, err := s.ListObjects(&s3.ListObjectsInput{
+			MaxKeys:   &maxKey,
+			Bucket:    aws.String(opts.Bucket),
+			Prefix:    aws.String(opts.RootDirectory + "/docker/registry/v2/repositories/"),
+			Delimiter: aws.String("/"),
+			Marker:    &marker,
+		})
 
-	if err != nil {
-		panic(err)
+		if err != nil {
+			panic(err)
+		}
+		isTruncated = *objs.IsTruncated
+		if isTruncated {
+			fmt.Println("result is truncated, continue to search")
+			marker = *objs.NextMarker
+		}
+
+		for i, cp := range objs.CommonPrefixes {
+			fmt.Printf("Prefix %d: %s\n", i, *cp.Prefix)
+
+			totalRemoved += cleanMPUs(s, opts.Bucket, *cp.Prefix)
+
+		}
+		fmt.Printf("Removing upload folders:%v\n", *objs.Prefix)
+		if !opts.DryRun {
+			cleanUploadFolders(s, opts.Bucket, *objs.Prefix)
+		}
 	}
 
-	if *objs.IsTruncated {
-		panic("Output is truncated. TO-DO: implement pagination")
-	}
-
-	for i, cp := range objs.CommonPrefixes {
-		fmt.Printf("Prefix %d: %s\n", i, *cp.Prefix)
-
-		totalRemoved += cleanMPUs(s, bucket, *cp.Prefix)
-		fmt.Printf("  Total MPUs removed: %d\n", totalRemoved)
-	}
-
-	fmt.Println()
-	fmt.Println("Removing upload folders:")
-	cleanUploadFolders(s, bucket, *objs.Prefix)
+	fmt.Printf("  Total MPUs removed: %d\n", totalRemoved)
 
 }
 
 func cleanMPUs(s *s3.S3, bucket, prefix string) (totalRemoved int) {
 	totalRemoved = 0
+	var isTruncated = true
+	var keyMarker string
+	for isTruncated {
+		resp, err := s.ListMultipartUploads(&s3.ListMultipartUploadsInput{
+			Bucket:     aws.String(bucket),
+			Prefix:     aws.String(prefix),
+			KeyMarker:  &keyMarker,
+			MaxUploads: aws.Int64(MaxResultCount),
+		})
 
-	resp, err := s.ListMultipartUploads(&s3.ListMultipartUploadsInput{
-		Bucket:     aws.String(bucket),
-		Prefix:     aws.String(prefix),
-		MaxUploads: aws.Int64(1000),
-	})
+		if err != nil {
+			panic(err)
+		}
 
-	if err != nil {
-		panic(err)
-	}
+		isTruncated = *resp.IsTruncated
+		keyMarker = *resp.NextKeyMarker
+		if isTruncated {
+			fmt.Println("output is truncated, continue to search")
+		}
 
-	if *resp.IsTruncated {
-		panic("Output is truncated. TO-DO: implement pagination")
-	}
+		fmt.Printf(" # of MPUs found for prefix: %d\n", len(resp.Uploads))
 
-	fmt.Printf(" # of MPUs found for prefix: %d\n", len(resp.Uploads))
+		for i, multi := range resp.Uploads {
+			fmt.Printf("  Upload %d: %s\n", i, *multi.Key)
 
-	for i, multi := range resp.Uploads {
-		fmt.Printf("  Upload %d: %s\n", i, *multi.Key)
+			hoursSince := int(time.Since(*multi.Initiated).Hours())
 
-		hoursSince := int(time.Since(*multi.Initiated).Hours())
+			fmt.Printf("  Started %d hours ago\n", hoursSince)
 
-		fmt.Printf("  Started %d hours ago\n", hoursSince)
-
-		if hoursSince > cleanupHours {
-			_, err = s.AbortMultipartUpload(&s3.AbortMultipartUploadInput{
-				Bucket:   aws.String(bucket),
-				Key:      multi.Key,
-				UploadId: multi.UploadId,
-			})
-
-			if err != nil {
-				fmt.Printf(" ERROR: %s\n", err)
-			} else {
-				fmt.Println("   Removed!")
+			if hoursSince > cleanupHours {
+				fmt.Printf("bucket %v, key: %+v, uploadID: %+v\n", bucket, *multi.Key, *multi.UploadId)
+				if !opts.DryRun {
+					_, err = s.AbortMultipartUpload(&s3.AbortMultipartUploadInput{
+						Bucket:   aws.String(bucket),
+						Key:      multi.Key,
+						UploadId: multi.UploadId,
+					})
+					if err != nil {
+						fmt.Printf(" ERROR: %s\n", err)
+					} else {
+						fmt.Println("   Removed!")
+					}
+				}
 				totalRemoved++
 			}
 		}
 	}
-
+	fmt.Printf("   Removed %v\n", totalRemoved)
 	return
 }
 
@@ -109,12 +148,12 @@ func cleanUploadFolders(s *s3.S3, bucket, prefix string) {
 		objs, err := s.ListObjectsV2(&s3.ListObjectsV2Input{
 			Bucket:            aws.String(bucket),
 			Prefix:            aws.String(prefix),
-			MaxKeys:           aws.Int64(100),
+			MaxKeys:           aws.Int64(MaxResultCount),
 			ContinuationToken: continuationToken,
 		})
 
 		if err != nil {
-			panic(err)
+			fmt.Println(err)
 		}
 
 		for _, o := range objs.Contents {
@@ -127,7 +166,9 @@ func cleanUploadFolders(s *s3.S3, bucket, prefix string) {
 
 				if hoursSince > cleanupHours {
 					fmt.Printf("  Removing folder %s (%d hours)\n", *o.Key, hoursSince)
-					removeUploadFolder(s, bucket, *o.Key)
+					if !opts.DryRun {
+						removeUploadFolder(s, bucket, *o.Key)
+					}
 				} else {
 					fmt.Printf("  Skipping folder %s (%d hours)\n", *o.Key, hoursSince)
 				}
@@ -167,15 +208,7 @@ func removeUploadFolder(s *s3.S3, bucket, prefix string) {
 
 }
 
-func getCommandLineArgs() (string, string, string, string) {
-	if len(os.Args) != 5 {
-		fmt.Printf("Usage: %s <endpoint> <bucketname> <accessKey> <secretKey>", os.Args[0])
-		os.Exit(1)
-	}
-	return os.Args[1], os.Args[2], os.Args[3], os.Args[4]
-}
-
-func getS3Client(endPoint, accessKey, secretAccessKey string) *s3.S3 {
+func getS3Client(endPoint, region, accessKey, secretAccessKey string) *s3.S3 {
 	awsConfig := aws.NewConfig()
 
 	creds := credentials.NewChainCredentials([]credentials.Provider{
@@ -194,7 +227,7 @@ func getS3Client(endPoint, accessKey, secretAccessKey string) *s3.S3 {
 	awsConfig.WithEndpoint(endPoint)
 
 	awsConfig.WithCredentials(creds)
-	awsConfig.WithRegion("us-west-1")
+	awsConfig.WithRegion(region)
 	awsConfig.WithDisableSSL(true)
 
 	return s3.New(session.New(awsConfig))
