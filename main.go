@@ -50,6 +50,10 @@ func main() {
 	fmt.Printf("CleanupHours:%v\n", opts.CleanupHours)
 	fmt.Printf("Endpoint: %s\n", *s.Config.Endpoint)
 	fmt.Printf("Bucket: %s\n\n", opts.Bucket)
+	prefix := "docker/registry/v2/repositories/"
+	if len(opts.RootDirectory) > 0 {
+		prefix = opts.RootDirectory + "/docker/registry/v2/repositories/"
+	}
 
 	var isTruncated = true
 	var marker string
@@ -58,7 +62,7 @@ func main() {
 		objs, err := s.ListObjects(&s3.ListObjectsInput{
 			MaxKeys:   &maxKey,
 			Bucket:    aws.String(opts.Bucket),
-			Prefix:    aws.String(opts.RootDirectory + "/docker/registry/v2/repositories/"),
+			Prefix:    aws.String(prefix),
 			Delimiter: aws.String("/"),
 			Marker:    &marker,
 		})
