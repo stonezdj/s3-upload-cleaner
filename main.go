@@ -111,8 +111,8 @@ func cleanMPUs(s *s3.S3, bucket, prefix string) (totalRemoved int) {
 		}
 
 		isTruncated = *resp.IsTruncated
-		keyMarker = *resp.NextKeyMarker
 		if isTruncated {
+			keyMarker = *resp.NextKeyMarker
 			fmt.Println("output is truncated, continue to search")
 		}
 
