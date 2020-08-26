@@ -27,7 +27,7 @@ var opts struct {
 	Bucket        string `short:"b" long:"bucket" description:"The bucket name" required:"true"`
 	AccessKey     string `short:"a" long:"accesskey" description:"Access Key" required:"true"`
 	SecretKey     string `short:"s" long:"secretkey" description:"Secret Key" required:"true"`
-	RootDirectory string `short:"d" long:"rootdir" description:"The root directory of the docker registry" required:"true"`
+	RootDirectory string `short:"d" long:"rootdir" description:"The root directory of the docker registry" default:"" required:"false"`
 	CleanupHours  int    `short:"c" long:"cleanup" description:"Cleanup Hours, it will cleanup multipart created before this hours ." default:"3" required:"false"`
 	DryRun        bool   `short:"y" long:"dryrun" description:"Dry run" required:"false"`
 }
@@ -50,10 +50,12 @@ func main() {
 	fmt.Printf("CleanupHours:%v\n", opts.CleanupHours)
 	fmt.Printf("Endpoint: %s\n", *s.Config.Endpoint)
 	fmt.Printf("Bucket: %s\n\n", opts.Bucket)
+	fmt.Printf("Root Directory is: %s\n\n", opts.RootDirectory)
 	prefix := "docker/registry/v2/repositories/"
 	if len(opts.RootDirectory) > 0 {
 		prefix = opts.RootDirectory + "/docker/registry/v2/repositories/"
 	}
+	fmt.Printf("prefix is %v", prefix)
 
 	var isTruncated = true
 	var marker string
